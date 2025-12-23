@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Texture Shifter — generate shifted & scaled texture frames (scanline mode)</title>
+  <style>
+    :root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+    body{margin:0;background:#0f1724;color:#e6eef8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+    .card{width:920px;max-width:100%;background:#0b1220;border-radius:12px;padding:20px;box-shadow:0 6px 30px rgba(2,6,23,0.7);}
+    h1{margin:0 0 6px;font-size:18px}
+    p.lead{margin:0 0 18px;color:#a6b6cc}
+    .row{display:flex;gap:12px;align-items:center}
+    .col{display:flex;flex-direction:column;gap:8px}
+    label{font-size:13px;color:#cbd9ee}
+    input[type=file]{color:transparent}
+    input[type=number], input[type=text], select{background:#071021;border:1px solid #172033;padding:8px;border-radius:6px;color:#dbeafe}
+    button{background:#2563eb;border:0;padding:10px 12px;border-radius:8px;color:white;font-weight:600;cursor:pointer}
+    button.secondary{background:#1f2937}
+    .muted{color:#89a0c6;font-size:13px}
+    .preview{margin-top:14px;display:flex;gap:12px;align-items:center}
+    canvas.preview-canvas{width:160px;height:auto;background:#071122;border-radius:6px;box-shadow:inset 0 0 0 1px rgba(255,255,255,0.02)}
+    .status{margin-top:12px;font-size:13px;color:#bcd3f6}
+    progress{width:100%;height:14px;border-radius:8px;overflow:hidden}
+    footer{margin-top:14px;font-size:12px;color:#8297c0}
+    .danger{color:#ffb4b4}
+    .controls{display:grid;grid-template-columns:1fr 120px 120px;gap:12px;align-items:end}
+    @media(max-width:720px){.controls{grid-template-columns:1fr 1fr}}  
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Texture Shifter — Scanline mode</h1>
+    <p class="lead">Now uses a <strong>scanline</strong> approach: for each Y (0..height-1) we extract the single horizontal scanline (width × 1), then create <em>depth</em> vertical-scale variants from that scanline. The same procedure is repeated on the 90° rotated image. All outputs are packaged into a ZIP for download.</p>
+
+    <div class="row" style="gap:18px;align-items:start">
+      <div style="flex:0 0 360px">
+        <label>Input texture</label>
+        <input id="fileInput" type="file" accept="image/*" />
+
+        <div style="margin-top:10px">
+          <label>Depth (number of vertical-scale variants per scanline)</label>
+          <input id="depthInput" type="number" min="1" max="256" value="5" />
+        </div>
+
+        <div style="margin-top:10px">
+          <label>Wrap mode (for rotated outputs)</label>
+          <select id="wrapMode">
+            <option value="wrap">Wrap (seamless)</option>
+            <option value="transparent">Transparent fill</option>
+          </select>
+        </div>
+
+        <div style="margin-top:10px">
+          <label>Filename prefix</label>
+          <input id="prefixInput" type="text" placeholder="texture" />
+        </div>
+
+        <div style="margin-top:12px" class="row">
+          <button id="generateBtn">Generate & Download ZIP</button>
+          <button id="previewBtn" class="secondary">Preview Original</button>
+        </div>
+
+        <div class="status" id="status">No image loaded.</div>
+
+      </div>
+
+      <div style="flex:1">
+        <label>Preview</label>
+        <div class="preview">
+          <canvas id="previewCanvas" class="preview-canvas"></canvas>
+          <div style="flex:1">
+            <div class="muted">Original size: <span id="origSize">-</span></div>
+            <div class="muted">Estimated frames: <span id="estFrames">0</span></div>
+            <div class="muted">Estimated ZIP entries: <span id="estEntries">0</span></div>
+            <div style="margin-top:8px"><progress id="progress" value="0" max="100"></progress></div>
+            <div style="margin-top:8px" class="muted">Tip: Scanline mode generates width×1 samples — each produces <em>depth</em> images. For large images increase caution.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      Single-file HTML — drop into a GitHub repo. License: MIT.
+    </footer>
+  </div>
+
+  <!-- CDN: JSZip and FileSaver -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script>
+    const $ = id => document.getElementById(id);
+    const fileInput = $('fileInput');
+    const depthInput = $('depthInput');
+    const wrapMode = $('wrapMode');
+    const prefixInput = $('prefixInput');
+    const generateBtn = $('generateBtn');
+    const previewBtn = $('previewBtn');
+    const previewCanvas = $('previewCanvas');
+    const status = $('status');
+    const origSize = $('origSize');
+    const estFrames = $('estFrames');
+    const estEntries = $('estEntries');
+    const progressBar = $('progress');
+
+    let loadedImage = null;
+    let origCanvas = null;
+
+    fileInput.addEventListener('change', async (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (!f) return;
+      await loadImageFile(f);
+    });
+
+    previewBtn.addEventListener('click', ()=>{
+      if (!origCanvas) return alert('Load an image first');
+      const w = origCanvas.width, h = origCanvas.height;
+      previewCanvas.width = w; previewCanvas.height = h;
+      const ctx = previewCanvas.getContext('2d'); ctx.clearRect(0,0,w,h);
+      const scale = Math.min(160/w, 160/h);
+      const tw = Math.round(w*scale), th=Math.round(h*scale);
+      const dx=(previewCanvas.width-tw)/2, dy=(previewCanvas.height-th)/2;
+      ctx.drawImage(origCanvas, 0, 0, w, h, dx, dy, tw, th);
+    });
+
+    async function loadImageFile(file){
+      status.textContent = 'Loading...';
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej });
+      loadedImage = img;
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const ctx = c.getContext('2d'); ctx.drawImage(img,0,0);
+      origCanvas = c;
+      origSize.textContent = `${img.width} × ${img.height}`;
+      updateEstimates();
+      status.textContent = 'Image loaded.';
+      previewBtn.click();
+    }
+
+    function updateEstimates(){
+      if (!origCanvas) return; const depth = Number(depthInput.value)||1;
+      const h = origCanvas.height, w = origCanvas.width;
+      const frames = (h * depth) + (w * depth);
+      estFrames.textContent = frames.toLocaleString();
+      estEntries.textContent = frames.toLocaleString();
+    }
+    depthInput.addEventListener('input', updateEstimates);
+
+    // Helpers
+    function canvasToBlob(canvas, type='image/png', quality=0.92){
+      return new Promise(resolve => canvas.toBlob(blob => resolve(blob), type, quality));
+    }
+
+    // Extract a single horizontal scanline (width x 1) from canvas at y
+    function extractScanline(baseCanvas, y){
+      const w = baseCanvas.width;
+      const out = document.createElement('canvas'); out.width = w; out.height = 1;
+      const ctx = out.getContext('2d');
+      ctx.drawImage(baseCanvas, 0, y, w, 1, 0, 0, w, 1);
+      return out;
+    }
+
+    // Scale scanline vertically by integer factor (resulting height = factor)
+    function scaleScanlineVertical(scanlineCanvas, factor){
+      const w = scanlineCanvas.width; const h = scanlineCanvas.height; // h should be 1 normally
+      const outH = Math.max(1, Math.round(h * factor));
+      const out = document.createElement('canvas'); out.width = w; out.height = outH;
+      const ctx = out.getContext('2d');
+      // draw the 1px row stretched vertically to outH
+      ctx.drawImage(scanlineCanvas, 0, 0, w, h, 0, 0, w, outH);
+      return out;
+    }
+
+    function rotate90Clockwise(canvas){
+      const out = document.createElement('canvas'); out.width = canvas.height; out.height = canvas.width;
+      const ctx = out.getContext('2d');
+      ctx.translate(out.width/2, out.height/2);
+      ctx.rotate(90 * Math.PI/180);
+      ctx.drawImage(canvas, -canvas.width/2, -canvas.height/2);
+      return out;
+    }
+
+    generateBtn.addEventListener('click', async ()=>{
+      if (!origCanvas) return alert('Please load an image first.');
+      const depth = Math.max(1, Math.floor(Number(depthInput.value) || 1));
+      const wrap = wrapMode.value === 'wrap';
+      const prefix = (prefixInput.value || 'texture').replace(/[^a-zA-Z0-9_\-]/g,'_');
+
+      const w = origCanvas.width, h = origCanvas.height;
+      const total = (h * depth) + (w * depth);
+      if (total > 10000){
+        if (!confirm(`This will generate ${total.toLocaleString()} images and create a ZIP. This may be slow or crash the browser. Continue?`)) return;
+      }
+
+      status.textContent = 'Preparing ZIP...';
+      progressBar.value = 0;
+
+      const zip = new JSZip();
+      const vertFolder = zip.folder(prefix + '_scanlines');
+      const horizFolder = zip.folder(prefix + '_scanlines_rot');
+
+      let processed = 0;
+      const updateProgress = ()=>{
+        processed++;
+        const pct = Math.round((processed/total)*100);
+        progressBar.value = pct;
+        status.textContent = `Processing ${processed.toLocaleString()} / ${total.toLocaleString()} images (${pct}%)`;
+      }
+
+      async function addCanvasToZip(folder, canvas, name){
+        const blob = await canvasToBlob(canvas, 'image/png', 0.92);
+        folder.file(name, blob);
+        updateProgress();
+      }
+
+      // --- Main: for each Y extract scanline (width x 1), then create depth scaled versions ---
+      for (let y=0;y<h;y++){
+        const scan = extractScanline(origCanvas, y);
+        for (let s=1;s<=depth;s++){
+          const scaled = (s===1) ? scan : scaleScanlineVertical(scan, s);
+          const filename = `scan_y${String(y).padStart(4,'0')}_scale${s}.png`;
+          await addCanvasToZip(vertFolder, scaled, filename);
+        }
+      }
+
+      // --- Rotated: rotate original and run the same scanline procedure ---
+      const rotated = rotate90Clockwise(origCanvas);
+      // rotated.height == original.width
+      for (let y=0;y<rotated.height;y++){
+        const scan = extractScanline(rotated, y);
+        for (let s=1;s<=depth;s++){
+          const scaled = (s===1) ? scan : scaleScanlineVertical(scan, s);
+          const filename = `rot_scan_y${String(y).padStart(4,'0')}_scale${s}.png`;
+          await addCanvasToZip(horizFolder, scaled, filename);
+        }
+      }
+
+      status.textContent = 'Generating ZIP file...';
+      progressBar.removeAttribute('value');
+
+      try{
+        const blob = await zip.generateAsync({type:'blob'}, meta => {
+          if (meta && typeof meta.percent === 'number'){
+            progressBar.value = Math.round(meta.percent);
+            status.textContent = `Zipping... ${Math.round(meta.percent)}%`;
+          }
+        });
+
+        const zipName = `${prefix}_scanlines_${w}x${h}_d${depth}.zip`;
+        saveAs(blob, zipName);
+        status.textContent = `Done — downloaded ${zipName}`;
+        progressBar.value = 100;
+      }catch(err){
+        console.error(err);
+        alert('Error while generating ZIP: ' + err.message);
+        status.textContent = 'Error: ' + err.message;
+      }
+
+    });
+
+    // Drag & drop support
+    window.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+    window.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f && f.type.startsWith('image/')){
+        fileInput.files = e.dataTransfer.files;
+        await loadImageFile(f);
+      }
+    });
+  </script>
+</body>
+</html>
