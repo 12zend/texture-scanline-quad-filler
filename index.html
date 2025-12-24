@@ -217,7 +217,7 @@
       // --- Main: for each Y extract scanline (width x 1), then create depth scaled versions ---
       for (let y=0;y<h;y++){
         const scan = extractScanline(origCanvas, y);
-        for (let s=1;s<=depth;s++){
+        for (let s=depth;s<=depth;s++){
           const scaled = (s===1) ? scan : scaleScanlineVertical(scan, s);
           const filename = `scan_y${String(y).padStart(4,'0')}_scale${s}.png`;
           await addCanvasToZip(vertFolder, scaled, filename);
@@ -229,7 +229,7 @@
       // rotated.height == original.width
       for (let y=0;y<rotated.height;y++){
         const scan = extractScanline(rotated, y);
-        for (let s=1;s<=depth;s++){
+        for (let s=depth;s<=depth;s++){
           const scaled = (s===1) ? scan : scaleScanlineVertical(scan, s);
           const filename = `rot_scan_y${String(y).padStart(4,'0')}_scale${s}.png`;
           await addCanvasToZip(horizFolder, scaled, filename);
