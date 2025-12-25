@@ -3,11 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Texture Shifter — scanline with rot</title>
+  <title>Texture Shifter — rotated scanline + U-resolution</title>
   <style>
     :root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;}
     body{margin:0;background:#0f1724;color:#e6eef8;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-    .card{width:920px;max-width:100%;background:#0b1220;border-radius:12px;padding:20px;box-shadow:0 6px 30px rgba(2,6,23,0.7);}
+    .card{width:960px;max-width:100%;background:#0b1220;border-radius:12px;padding:20px;box-shadow:0 6px 30px rgba(2,6,23,0.7);}
     h1{margin:0 0 6px;font-size:18px}
     p.lead{margin:0 0 18px;color:#a6b6cc}
     .row{display:flex;gap:12px;align-items:center}
@@ -31,20 +31,25 @@
 <body>
   <div class="card">
     <h1>Texture Shifter</h1>
-    <p class="lead">Drop or choose a texture (PNG/JPG/etc). This will produce horizontally-extracted scanlines (width × 1) for every Y, each stretched vertically by the single <em>depth</em> factor you set. The same set is produced for the 90° rotated image as well. All outputs are packaged into a ZIP for download.</p>
+    <p class="lead">Drop or choose a texture (PNG/JPG/etc). This tool processes only the <strong>90° rotated</strong> texture: for every scanline (width × 1) of the rotated image it produces a vertically-stretched image using the single <em>depth</em> factor, and for each scanline it also produces multiple U-variants according to <strong>texture U resolution</strong>. All outputs are packaged into a ZIP (one folder) and downloaded.</p>
 
     <div class="row" style="gap:18px;align-items:start">
-      <div style="flex:0 0 360px">
+      <div style="flex:0 0 380px">
         <label>Input texture</label>
         <input id="fileInput" type="file" accept="image/*" />
 
         <div style="margin-top:10px">
-          <label>Depth (vertical stretch factor to apply to each scanline)</label>
-          <input id="depthInput" type="number" min="1" max="256" value="5" />
+          <label>Depth (vertical stretch factor)</label>
+          <input id="depthInput" type="number" min="1" max="1024" value="5" />
         </div>
 
         <div style="margin-top:10px">
-          <label>Wrap vertically / horizontally</label>
+          <label>Texture U resolution (integer, default 8)</label>
+          <input id="uResolutionInput" type="number" min="1" max="256" value="8" />
+        </div>
+
+        <div style="margin-top:10px">
+          <label>Wrap mode (used when rotating / scaling)</label>
           <select id="wrapMode">
             <option value="wrap">Wrap (seamless)</option>
             <option value="transparent">Transparent fill</option>
@@ -74,7 +79,7 @@
             <div class="muted">Estimated frames: <span id="estFrames">0</span></div>
             <div class="muted">Estimated ZIP entries: <span id="estEntries">0</span></div>
             <div style="margin-top:8px"><progress id="progress" value="0" max="100"></progress></div>
-            <div style="margin-top:8px" class="muted">Tip: Each scanline becomes a single stretched image (scale = <em>depth</em>). Both original and 90°-rotated scanline sets are included in the ZIP (two folders).</div>
+            <div style="margin-top:8px" class="muted">Tip: Outputs = rotated height × U resolution. Each output is width × depth (cropped to width after horizontal U-scaling).</div>
           </div>
         </div>
       </div>
@@ -85,14 +90,14 @@
     </footer>
   </div>
 
-  <!-- CDN: JSZip and FileSaver (both permissive public cdns) -->
+  <!-- CDN: JSZip and FileSaver -->
   <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
   <script>
-    // Utility
     const $ = id => document.getElementById(id);
     const fileInput = $('fileInput');
     const depthInput = $('depthInput');
+    const uResolutionInput = $('uResolutionInput');
     const wrapMode = $('wrapMode');
     const prefixInput = $('prefixInput');
     const generateBtn = $('generateBtn');
@@ -118,14 +123,10 @@
       const w = origCanvas.width, h = origCanvas.height;
       previewCanvas.width = w; previewCanvas.height = h;
       const ctx = previewCanvas.getContext('2d'); ctx.clearRect(0,0,w,h);
-      // draw a smaller preview scaled to canvas element size
       const scale = Math.min(160/w, 160/h);
       const tw = Math.round(w*scale), th=Math.round(h*scale);
-      // center
-      ctx.save(); ctx.clearRect(0,0,previewCanvas.width,previewCanvas.height);
       const dx=(previewCanvas.width-tw)/2, dy=(previewCanvas.height-th)/2;
       ctx.drawImage(origCanvas, 0, 0, w, h, dx, dy, tw, th);
-      ctx.restore();
     });
 
     async function loadImageFile(file){
@@ -134,7 +135,6 @@
       img.src = URL.createObjectURL(file);
       await new Promise((res, rej) => { img.onload = res; img.onerror = rej });
       loadedImage = img;
-      // draw to origCanvas
       const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
       const ctx = c.getContext('2d'); ctx.drawImage(img,0,0);
       origCanvas = c;
@@ -145,15 +145,15 @@
     }
 
     function updateEstimates(){
-      if (!origCanvas) return; const depth = Number(depthInput.value)||1;
-      const h = origCanvas.height, w = origCanvas.width;
-      const frames = (h) + (w); // single scale per scanline for both original and rotated
+      if (!origCanvas) return; const depth = Number(depthInput.value)||1; const ures = Math.max(1, Math.floor(Number(uResolutionInput.value)||8));
+      const rotatedHeight = origCanvas.width; // rotated.height == original.width
+      const frames = rotatedHeight * ures;
       estFrames.textContent = frames.toLocaleString();
       estEntries.textContent = frames.toLocaleString();
     }
     depthInput.addEventListener('input', updateEstimates);
+    uResolutionInput.addEventListener('input', updateEstimates);
 
-    // canvas -> blob promise
     function canvasToBlob(canvas, type='image/png', quality=0.92){
       return new Promise(resolve => canvas.toBlob(blob => resolve(blob), type, quality));
     }
@@ -167,13 +167,28 @@
       return out;
     }
 
+    // Scale horizontally (anchored at left) and then crop to targetWidth
+    function scaleAndCropHorizontal(scanlineCanvas, scaleX, targetWidth){
+      const w = scanlineCanvas.width;
+      const scaledW = Math.max(1, Math.round(w * scaleX));
+      const tmp = document.createElement('canvas'); tmp.width = scaledW; tmp.height = 1;
+      const tctx = tmp.getContext('2d');
+      // draw anchored at left (0,0) scaled horizontally
+      tctx.drawImage(scanlineCanvas, 0, 0, w, 1, 0, 0, scaledW, 1);
+      // crop to targetWidth (left-aligned)
+      const outW = targetWidth;
+      const out = document.createElement('canvas'); out.width = outW; out.height = 1;
+      const octx = out.getContext('2d');
+      octx.drawImage(tmp, 0, 0, outW, 1, 0, 0, outW, 1);
+      return out;
+    }
+
     // Scale scanline vertically by integer factor (resulting height = factor)
     function scaleScanlineVertical(scanlineCanvas, factor){
-      const w = scanlineCanvas.width; const h = scanlineCanvas.height; // h should be 1 normally
+      const w = scanlineCanvas.width; const h = scanlineCanvas.height; // h should be 1
       const outH = Math.max(1, Math.round(h * factor));
       const out = document.createElement('canvas'); out.width = w; out.height = outH;
       const ctx = out.getContext('2d');
-      // draw the 1px row stretched vertically to outH
       ctx.drawImage(scanlineCanvas, 0, 0, w, h, 0, 0, w, outH);
       return out;
     }
@@ -187,24 +202,19 @@
       return out;
     }
 
-    function scaleYCanvas(baseCanvas, factor){
-      const w = baseCanvas.width, h = baseCanvas.height;
-      const out = document.createElement('canvas'); out.width = w; out.height = Math.max(1, Math.round(h * factor));
-      const ctx = out.getContext('2d');
-      // draw scaled vertically
-      ctx.drawImage(baseCanvas, 0, 0, w, h, 0, 0, w, out.height);
-      return out;
-    }
-
     generateBtn.addEventListener('click', async ()=>{
       if (!origCanvas) return alert('Please load an image first.');
       const depth = Math.max(1, Math.floor(Number(depthInput.value) || 1));
+      const ures = Math.max(1, Math.floor(Number(uResolutionInput.value) || 8));
       const wrap = wrapMode.value === 'wrap';
       const prefix = (prefixInput.value || 'texture').replace(/[^a-zA-Z0-9_\-]/g,'_');
 
-      const w = origCanvas.width, h = origCanvas.height;
-      const total = (h) + (w); // single scaled image per scanline for original + rotated
-      if (total > 10000){
+      const rotated = rotate90Clockwise(origCanvas);
+      const w = rotated.width; // width of rotated
+      const h = rotated.height; // height of rotated (== original.width)
+      const total = h * ures;
+
+      if (total > 20000){
         if (!confirm(`This will generate ${total.toLocaleString()} images and create a ZIP. This may be slow or crash the browser. Continue?`)) return;
       }
 
@@ -212,8 +222,7 @@
       progressBar.value = 0;
 
       const zip = new JSZip();
-      const vertFolder = zip.folder(prefix + '_scanlines');
-      const horizFolder = zip.folder(prefix + '_scanlines_rot');
+      const folder = zip.folder(prefix + '_scanlines_rot');
 
       let processed = 0;
       const updateProgress = ()=>{
@@ -223,43 +232,40 @@
         status.textContent = `Processing ${processed.toLocaleString()} / ${total.toLocaleString()} images (${pct}%)`;
       }
 
-      // Helper to add canvas to zip
-      async function addCanvasToZip(folder, canvas, name){
+      async function addCanvasToZip(folderRef, canvas, name){
         const blob = await canvasToBlob(canvas, 'image/png', 0.92);
-        folder.file(name, blob);
+        folderRef.file(name, blob);
         updateProgress();
       }
 
-      // Vertical (original) scanlines: for each Y extract widthx1 and scale by depth (single)
+      // For each scanline in rotated image (y=0..h-1) -> produce u-resolution variants
       for (let y=0;y<h;y++){
-        const scan = extractScanline(origCanvas, y);
-        const scaled = (depth===1) ? scan : scaleScanlineVertical(scan, depth);
-        const filename = `scan_y${String(y).padStart(4,'0')}_s${depth}.png`;
-        await addCanvasToZip(vertFolder, scaled, filename);
+        const scan = extractScanline(rotated, y); // width w x 1
+        for (let ustep=0; ustep<ures; ustep++){
+          // compute u and scaleX as described: u = 1.0 - ustep*(1.0/ures); scaleX = 1.0 / u
+          const u = 1.0 - (ustep * (1.0 / ures));
+          const scaleX = 1.0 / u; // >=1, never dividing by zero because u >= 1/ures
+          // scale horizontally anchored at left, then crop to original width w
+          const horizCropped = scaleAndCropHorizontal(scan, scaleX, w);
+          // now vertically scale by depth (single factor)
+          const finalCanvas = (depth === 1) ? horizCropped : scaleScanlineVertical(horizCropped, depth);
+          const filename = `rot_scan_y${String(y).padStart(4,'0')}_u${String(ustep).padStart(3,'0')}_s${depth}.png`;
+          await addCanvasToZip(folder, finalCanvas, filename);
+        }
       }
 
-      // Rotated: rotate original 90° clockwise and perform same scanline extraction
-      const rotated = rotate90Clockwise(origCanvas);
-      for (let x=0;x<rotated.height;x++){
-        const scan = extractScanline(rotated, x);
-        const scaled = (depth===1) ? scan : scaleScanlineVertical(scan, depth);
-        const filename = `rot_scan_x${String(x).padStart(4,'0')}_s${depth}.png`;
-        await addCanvasToZip(horizFolder, scaled, filename);
-      }
-
-      status.textContent = 'Generating ZIP file (this may take a while)...';
-      progressBar.removeAttribute('value'); // make it indeterminate while zipping
+      status.textContent = 'Generating ZIP file...';
+      progressBar.removeAttribute('value');
 
       try{
         const blob = await zip.generateAsync({type:'blob'}, meta => {
-          // meta.percent is 0..100 for zipping process
           if (meta && typeof meta.percent === 'number'){
             progressBar.value = Math.round(meta.percent);
             status.textContent = `Zipping... ${Math.round(meta.percent)}%`;
           }
         });
 
-        const zipName = `${prefix}_scanlines_${w}x${h}_s${depth}.zip`;
+        const zipName = `${prefix}_scanlines_rot_${origCanvas.width}x${origCanvas.height}_u${ures}_s${depth}.zip`;
         saveAs(blob, zipName);
         status.textContent = `Done — downloaded ${zipName}`;
         progressBar.value = 100;
@@ -271,13 +277,13 @@
 
     });
 
-    // Drag & drop support on the whole window
+    // Drag & drop support
     window.addEventListener('dragover', e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
     window.addEventListener('drop', async (e) => {
       e.preventDefault();
       const f = e.dataTransfer.files && e.dataTransfer.files[0];
       if (f && f.type.startsWith('image/')){
-        fileInput.files = e.dataTransfer.files; // update input element
+        fileInput.files = e.dataTransfer.files;
         await loadImageFile(f);
       }
     });
